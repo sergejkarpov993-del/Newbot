@@ -1,29 +1,5 @@
-# Секреты
 .env
-.env.local
-
-# Питон
-__pycache__
+__pycache__/
 *.pyc
-*.pyo
-*.pyd
-*.Python
-venv/
-env/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Логи
-.log
-
-# Системные
+*.log
 .DS_Store
-Thumbs.db
-
-# Резервные копии бота
-backup_*.json
-salon_export_*.txt
