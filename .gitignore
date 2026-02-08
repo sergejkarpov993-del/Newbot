@@ -3,11 +3,11 @@
 .env.local
 
 # Питон
-__pycache__/
+__pycache__
 *.pyc
 *.pyo
 *.pyd
-.Python
+*.Python
 venv/
 env/
 
@@ -18,7 +18,7 @@ env/
 *.swo
 
 # Логи
-*.log
+.log
 
 # Системные
 .DS_Store
