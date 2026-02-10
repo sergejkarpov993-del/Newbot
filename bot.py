@@ -193,6 +193,7 @@ class GalleryState(StatesGroup):
     confirm_delete = State()
     waiting_delete_number = State()
 
+
 # ========== ИНИЦИАЛИЗАЦИЯ ==========
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -398,7 +399,7 @@ async def handle_payment_success(message: types.Message, payment_id: str):
         payment_data = pending_payments[payment_id]
 
         date_key = payment_data['date_obj'].strftime("%Y-%m-%d") if isinstance(payment_data['date_obj'], datetime) else \
-        payment_data['date_obj']
+            payment_data['date_obj']
         time_key = payment_data['time']
 
         if date_key not in appointments_db:
@@ -461,9 +462,10 @@ async def handle_payment_success(message: types.Message, payment_id: str):
 
 # ========== ЗАПИСЬ НА УСЛУГУ ==========
 @dp.message(F.text == "📅 Записаться")
-async def start_appointment(message: types.Message):
+async def start_appointment(message: types.Message, state: FSMContext):
     """Начать запись"""
     logger.info(f"User {message.from_user.id} started appointment")
+    await state.set_state(AppointmentState.choose_service)
     await message.answer(
         "💅 *Выберите услугу:*\n\n"
         "👇 Нажмите на нужную услугу:",
@@ -472,13 +474,17 @@ async def start_appointment(message: types.Message):
     )
 
 
-@dp.message(lambda message: any(
-    f"💅 {service['name']} - {service['price']}₽" == message.text
-    for service in services_db.values()
-))
-async def handle_service_button(message: types.Message, state: FSMContext):
-    """Обработка выбора услуги"""
+@dp.message(AppointmentState.choose_service)
+async def handle_service_selection(message: types.Message, state: FSMContext):
+    """Обработка выбора услуги - ИСПРАВЛЕНА: добавлено состояние"""
     logger.info(f"User {message.from_user.id} selected service: {message.text}")
+
+    # Проверка на кнопку "Назад"
+    if message.text == "⬅️ Назад":
+        await state.clear()
+        await message.answer("🏠 Главное меню:", reply_markup=main_kb())
+        return
+
     for key, service in services_db.items():
         button_text = f"💅 {service['name']} - {service['price']}₽"
 
@@ -506,9 +512,268 @@ async def handle_service_button(message: types.Message, state: FSMContext):
     await message.answer("Выберите услугу:", reply_markup=services_kb())
 
 
+@dp.message(AppointmentState.choose_date)
+async def handle_date_selection(message: types.Message, state: FSMContext):
+    """Обработка выбора даты - ИСПРАВЛЕНА: добавлено состояние"""
+    logger.info(f"User {message.from_user.id} selected date: {message.text}")
+
+    # Проверка на кнопку "Назад"
+    if message.text == "⬅️ Назад":
+        await state.set_state(AppointmentState.choose_service)
+        await message.answer("💅 Выберите услугу:", reply_markup=services_kb())
+        return
+
+    try:
+        # Проверяем, что это дата в правильном формате
+        selected_date = datetime.strptime(message.text, "%d.%m.%Y").date()
+        today = datetime.now().date()
+
+        # Проверяем, что дата не в прошлом и не дальше 7 дней
+        if selected_date < today:
+            await message.answer("❌ Нельзя выбрать прошедшую дату. Выберите другую дату:", reply_markup=dates_kb())
+            return
+
+        if (selected_date - today).days > 6:
+            await message.answer("❌ Можно записываться только на ближайшие 7 дней. Выберите другую дату:",
+                                 reply_markup=dates_kb())
+            return
+
+        data = await state.get_data()
+        service_key = data.get('service_key')
+
+        if not service_key:
+            await message.answer("❌ Ошибка: услуга не выбрана. Начните сначала.", reply_markup=main_kb())
+            await state.clear()
+            return
+
+        free_slots = get_free_slots(selected_date, service_key)
+
+        if not free_slots:
+            await message.answer(
+                f"❌ *На {message.text} нет свободных слотов*\n\n"
+                f"Пожалуйста, выберите другую дату:",
+                reply_markup=dates_kb(),
+                parse_mode="Markdown"
+            )
+            return
+
+        await state.update_data(
+            date_obj=selected_date,
+            date_display=message.text
+        )
+
+        # Создаем клавиатуру с временными слотами
+        time_buttons = []
+        for i in range(0, len(free_slots), 3):
+            row = []
+            for slot in free_slots[i:i + 3]:
+                row.append(KeyboardButton(text=slot))
+            time_buttons.append(row)
+        time_buttons.append([KeyboardButton(text="⬅️ Назад")])
+
+        time_kb = ReplyKeyboardMarkup(keyboard=time_buttons, resize_keyboard=True)
+
+        await state.set_state(AppointmentState.choose_time)
+        await message.answer(
+            f"✅ *Дата: {message.text}*\n\n"
+            f"👇 *Выберите время:*",
+            reply_markup=time_kb,
+            parse_mode="Markdown"
+        )
+
+    except ValueError:
+        await message.answer("❌ Неверный формат даты. Выберите дату из списка:", reply_markup=dates_kb())
+
+
+@dp.message(AppointmentState.choose_time)
+async def handle_time_selection(message: types.Message, state: FSMContext):
+    """Обработка выбора времени - ИСПРАВЛЕНА: добавлено состояние"""
+    logger.info(f"User {message.from_user.id} selected time: {message.text}")
+
+    # Проверка на кнопку "Назад"
+    if message.text == "⬅️ Назад":
+        await state.set_state(AppointmentState.choose_date)
+        await message.answer("📅 Выберите дату:", reply_markup=dates_kb())
+        return
+
+    # Проверяем формат времени HH:MM
+    if not ":" in message.text or len(message.text) != 5:
+        await message.answer("❌ Неверный формат времени. Выберите время из списка.")
+        return
+
+    data = await state.get_data()
+    selected_date = data.get('date_obj')
+    service_key = data.get('service_key')
+
+    if not selected_date or not service_key:
+        await message.answer("❌ Ошибка: данные не найдены. Начните сначала.", reply_markup=main_kb())
+        await state.clear()
+        return
+
+    # Проверяем, что выбранное время доступно
+    free_slots = get_free_slots(selected_date, service_key)
+    if message.text not in free_slots:
+        await message.answer("❌ Это время уже занято. Выберите другое время.")
+        return
+
+    await state.update_data(time=message.text)
+    await state.set_state(AppointmentState.enter_name)
+
+    await message.answer(
+        f"✅ *Время: {message.text}*\n\n"
+        f"👤 *Введите ваше имя:*\n"
+        f"(например: Анна Иванова)",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="⬅️ Назад")]],
+            resize_keyboard=True
+        ),
+        parse_mode="Markdown"
+    )
+
+
+@dp.message(AppointmentState.enter_name)
+async def handle_name_input(message: types.Message, state: FSMContext):
+    """Обработка ввода имени"""
+    logger.info(f"User {message.from_user.id} entered name: {message.text}")
+
+    # Проверка на кнопку "Назад"
+    if message.text == "⬅️ Назад":
+        data = await state.get_data()
+
+        # Создаем клавиатуру с временными слотами
+        free_slots = get_free_slots(data['date_obj'], data['service_key'])
+        time_buttons = []
+        for i in range(0, len(free_slots), 3):
+            row = []
+            for slot in free_slots[i:i + 3]:
+                row.append(KeyboardButton(text=slot))
+            time_buttons.append(row)
+        time_buttons.append([KeyboardButton(text="⬅️ Назад")])
+
+        time_kb = ReplyKeyboardMarkup(keyboard=time_buttons, resize_keyboard=True)
+
+        await state.set_state(AppointmentState.choose_time)
+        await message.answer("⏰ Выберите время:", reply_markup=time_kb)
+        return
+
+    # Проверяем, что имя не пустое
+    if len(message.text.strip()) < 2:
+        await message.answer("❌ Имя должно содержать минимум 2 символа. Введите ваше имя:")
+        return
+
+    await state.update_data(name=message.text.strip())
+    await state.set_state(AppointmentState.enter_phone)
+
+    await message.answer(
+        f"✅ *Имя: {message.text.strip()}*\n\n"
+        f"📞 *Введите ваш номер телефона:*\n"
+        f"(например: +79161234567 или 89161234567)",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="⬅️ Назад")]],
+            resize_keyboard=True
+        ),
+        parse_mode="Markdown"
+    )
+
+
+@dp.message(AppointmentState.enter_phone)
+async def handle_phone_input(message: types.Message, state: FSMContext):
+    """Обработка ввода телефона"""
+    logger.info(f"User {message.from_user.id} entered phone: {message.text}")
+
+    # Проверка на кнопку "Назад"
+    if message.text == "⬅️ Назад":
+        await state.set_state(AppointmentState.enter_name)
+        await message.answer("👤 Введите ваше имя:")
+        return
+
+    # Проверяем формат телефона
+    phone = message.text.strip()
+    # Удаляем все нецифровые символы кроме +
+    cleaned_phone = ''.join(filter(lambda x: x.isdigit() or x == '+', phone))
+
+    if len(cleaned_phone) < 10:
+        await message.answer("❌ Неверный формат телефона. Введите номер в формате +79161234567 или 89161234567:")
+        return
+
+    await state.update_data(phone=cleaned_phone)
+
+    # Получаем все данные
+    data = await state.get_data()
+
+    # Генерируем уникальный ID для платежа
+    payment_id = str(uuid.uuid4())[:8]
+
+    # Сохраняем данные в ожидании оплаты
+    pending_payments[payment_id] = {
+        'user_id': message.from_user.id,
+        'name': data['name'],
+        'phone': data['phone'],
+        'service_name': data['service_name'],
+        'service_key': data['service_key'],
+        'price': data['price'],
+        'date_obj': data['date_obj'],
+        'date_display': data['date_display'],
+        'time': data['time'],
+        'created_at': datetime.now().isoformat()
+    }
+
+    # Создаем ссылку для оплаты
+    payment_link = create_yoomoney_payment_link(
+        amount=data['price'],
+        label=payment_id,
+        comment=f"Оплата услуги {data['service_name']} на {data['date_display']} {data['time']}"
+    )
+
+    # Сохраняем данные
+    save_all_data()
+
+    # Отправляем сообщение с подтверждением и кнопкой оплаты
+    confirmation_text = (
+        f"✅ *Все данные заполнены!*\n\n"
+        f"📋 *Детали записи:*\n"
+        f"• Услуга: {data['service_name']}\n"
+        f"• Цена: {data['price']}₽\n"
+        f"• Дата: {data['date_display']}\n"
+        f"• Время: {data['time']}\n"
+        f"• Имя: {data['name']}\n"
+        f"• Телефон: {data['phone']}\n\n"
+        f"💳 *Для подтверждения записи необходимо произвести оплату.*\n\n"
+        f"📍 *После оплаты запишитесь в наше расписание!*\n"
+        f"📞 *По всем вопросам: +7 (999) 123-45-67*"
+    )
+
+    # Создаем inline-кнопку для оплаты
+    payment_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Оплатить онлайн", url=payment_link)],
+            [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"check_payment_{payment_id}")]
+        ]
+    )
+
+    await message.answer(
+        confirmation_text,
+        reply_markup=payment_keyboard,
+        parse_mode="Markdown"
+    )
+
+    await state.set_state(AppointmentState.payment)
+
+
+@dp.callback_query(F.data.startswith("check_payment_"))
+async def check_payment_handler(callback: types.CallbackQuery, state: FSMContext):
+    """Проверка оплаты"""
+    payment_id = callback.data.replace("check_payment_", "")
+
+    if payment_id in pending_payments:
+        await callback.answer("⏳ Платеж еще обрабатывается. Дождитесь уведомления об успешной оплате.")
+    else:
+        await callback.answer("✅ Запись уже оплачена и подтверждена!")
+
+
 @dp.message(F.text == "⬅️ Назад")
 async def back_handler(message: types.Message, state: FSMContext):
-    """Кнопка Назад"""
+    """Кнопка Назад - ИСПРАВЛЕНА: улучшена логика"""
     current_state = await state.get_state()
 
     if not current_state:
@@ -552,7 +817,394 @@ async def back_handler(message: types.Message, state: FSMContext):
         await message.answer("🏠 Главное меню:", reply_markup=main_kb())
 
 
-# Остальные обработчики записи остаются без изменений...
+# ========== МОИ ЗАПИСИ ==========
+@dp.message(F.text == "📋 Мои записи")
+async def my_appointments(message: types.Message):
+    """Показать мои записи - ИСПРАВЛЕНА: добавлен обработчик"""
+    user_id = str(message.from_user.id)
+
+    # Ищем записи пользователя
+    user_appointments = []
+    for date_key, times in appointments_db.items():
+        for time_key, appointment in times.items():
+            if str(appointment.get('user_id')) == user_id:
+                try:
+                    date_display = datetime.strptime(date_key, "%Y-%m-%d").strftime("%d.%m.%Y")
+                    status = "✅ Оплачено" if appointment.get('paid') else "⏳ Ожидает оплаты"
+                    user_appointments.append(
+                        f"📅 {date_display} {time_key}\n"
+                        f"💅 {appointment.get('service', 'Неизвестно')}\n"
+                        f"💰 {appointment.get('price', 0)}₽ - {status}\n"
+                        f"📞 {appointment.get('phone', 'Не указан')}\n"
+                    )
+                except:
+                    continue
+
+    if user_appointments:
+        text = "📋 *Ваши записи:*\n\n" + "\n\n".join(user_appointments)
+        text += f"\n\nВсего записей: {len(user_appointments)}"
+    else:
+        text = "📭 У вас нет активных записей.\n\nЗапишитесь на услугу через меню «📅 Записаться»"
+
+    await message.answer(text, reply_markup=main_kb(), parse_mode="Markdown")
+
+
+# ========== ОТМЕНА ЗАПИСИ ==========
+@dp.message(F.text == "❌ Отменить запись")
+async def cancel_appointment_start(message: types.Message, state: FSMContext):
+    """Начать отмену записи - ИСПРАВЛЕНА: добавлен обработчик"""
+    user_id = str(message.from_user.id)
+
+    # Ищем записи пользователя
+    user_appointments = []
+    for date_key, times in appointments_db.items():
+        for time_key, appointment in times.items():
+            if str(appointment.get('user_id')) == user_id and appointment.get('paid'):
+                try:
+                    date_display = datetime.strptime(date_key, "%Y-%m-%d").strftime("%d.%m.%Y")
+                    appointment_datetime = datetime.strptime(f"{date_key} {time_key}", "%Y-%m-%d %H:%M")
+
+                    # Рассчитываем возврат
+                    refund_info = calculate_refund_amount(appointment_datetime, appointment.get('price', 0))
+
+                    user_appointments.append({
+                        'date_key': date_key,
+                        'time_key': time_key,
+                        'date_display': date_display,
+                        'time': time_key,
+                        'service': appointment.get('service', 'Неизвестно'),
+                        'price': appointment.get('price', 0),
+                        'appointment_datetime': appointment_datetime,
+                        'refund_info': refund_info,
+                        'display': f"📅 {date_display} {time_key} - {appointment.get('service', 'Неизвестно')} - {appointment.get('price', 0)}₽\nВозврат: {refund_info['refund_amount']}₽ ({refund_info['percent']}%)"
+                    })
+                except Exception as e:
+                    logger.error(f"Ошибка обработки записи для отмены: {e}")
+                    continue
+
+    if not user_appointments:
+        await message.answer(
+            "📭 У вас нет оплаченных записей для отмены.\n\n"
+            "Отменить можно только оплаченные записи.",
+            reply_markup=main_kb()
+        )
+        return
+
+    # Сохраняем записи в состояние
+    await state.update_data(user_appointments=user_appointments)
+
+    # Создаем клавиатуру с записями
+    buttons = []
+    for i, appt in enumerate(user_appointments[:5]):  # Ограничиваем 5 записями
+        buttons.append([KeyboardButton(text=f"❌ {i + 1}. {appt['date_display']} {appt['time']}")])
+    buttons.append([KeyboardButton(text="⬅️ Назад")])
+
+    cancel_kb = ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
+    await state.set_state(CancelState.choose_appointment)
+    await message.answer(
+        "🗑 *Выберите запись для отмены:*\n\n"
+        "👇 Нажмите на запись, которую хотите отменить:",
+        reply_markup=cancel_kb,
+        parse_mode="Markdown"
+    )
+
+
+@dp.message(CancelState.choose_appointment)
+async def handle_appointment_selection(message: types.Message, state: FSMContext):
+    """Обработка выбора записи для отмены"""
+    if message.text == "⬅️ Назад":
+        await state.clear()
+        await message.answer("🏠 Главное меню:", reply_markup=main_kb())
+        return
+
+    data = await state.get_data()
+    user_appointments = data.get('user_appointments', [])
+
+    # Пытаемся определить, какую запись выбрал пользователь
+    selected_index = -1
+
+    # Проверяем, если текст содержит номер
+    for i in range(len(user_appointments)):
+        if f"{i + 1}." in message.text:
+            selected_index = i
+            break
+
+    if selected_index == -1:
+        # Ищем по дате и времени
+        for i, appt in enumerate(user_appointments):
+            if appt['date_display'] in message.text and appt['time'] in message.text:
+                selected_index = i
+                break
+
+    if selected_index == -1 or selected_index >= len(user_appointments):
+        await message.answer("❌ Не удалось определить выбранную запись. Попробуйте еще раз.")
+        return
+
+    selected_appointment = user_appointments[selected_index]
+
+    # Сохраняем выбранную запись
+    await state.update_data(selected_index=selected_index, selected_appointment=selected_appointment)
+
+    # Показываем информацию о возврате
+    refund_info = selected_appointment['refund_info']
+
+    confirmation_text = (
+        f"⚠️ *Подтверждение отмены*\n\n"
+        f"📋 *Детали записи:*\n"
+        f"• Дата: {selected_appointment['date_display']}\n"
+        f"• Время: {selected_appointment['time']}\n"
+        f"• Услуга: {selected_appointment['service']}\n"
+        f"• Сумма: {selected_appointment['price']}₽\n\n"
+        f"💰 *Возврат средств:*\n"
+        f"• До отмены: {refund_info['hours_left']} часов\n"
+        f"• Процент возврата: {refund_info['percent']}%\n"
+        f"• Сумма возврата: {refund_info['refund_amount']}₽\n"
+        f"• Удерживается: {refund_info['penalty']}₽\n\n"
+        f"❓ *Вы уверены, что хотите отменить эту запись?*"
+    )
+
+    await state.set_state(CancelState.confirm_cancel)
+    await message.answer(
+        confirmation_text,
+        reply_markup=confirm_cancel_kb(),
+        parse_mode="Markdown"
+    )
+
+
+@dp.message(CancelState.confirm_cancel)
+async def confirm_cancellation(message: types.Message, state: FSMContext):
+    """Подтверждение отмены записи"""
+    if message.text == "⬅️ Назад":
+        await state.set_state(CancelState.choose_appointment)
+
+        data = await state.get_data()
+        user_appointments = data.get('user_appointments', [])
+
+        # Создаем клавиатуру заново
+        buttons = []
+        for i, appt in enumerate(user_appointments[:5]):
+            buttons.append([KeyboardButton(text=f"❌ {i + 1}. {appt['date_display']} {appt['time']}")])
+        buttons.append([KeyboardButton(text="⬅️ Назад")])
+
+        cancel_kb = ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
+        await message.answer(
+            "🗑 Выберите запись для отмены:",
+            reply_markup=cancel_kb
+        )
+        return
+
+    if message.text == "✅ Да, отменить":
+        data = await state.get_data()
+        selected_index = data.get('selected_index')
+        selected_appointment = data.get('selected_appointment')
+        user_appointments = data.get('user_appointments', [])
+
+        if selected_index is None or not selected_appointment:
+            await message.answer("❌ Ошибка: данные о записи не найдены.", reply_markup=main_kb())
+            await state.clear()
+            return
+
+        try:
+            # Удаляем запись из базы
+            date_key = selected_appointment['date_key']
+            time_key = selected_appointment['time_key']
+
+            if date_key in appointments_db and time_key in appointments_db[date_key]:
+                # Сохраняем информацию об отмененной записи
+                cancelled_appointment = appointments_db[date_key][time_key].copy()
+                cancelled_appointment.update({
+                    'cancelled_at': datetime.now().isoformat(),
+                    'cancelled_by': message.from_user.id,
+                    'refund_amount': selected_appointment['refund_info']['refund_amount'],
+                    'penalty': selected_appointment['refund_info']['penalty'],
+                    'original_date': date_key,
+                    'original_time': time_key
+                })
+
+                cancelled_appointments.append(cancelled_appointment)
+
+                # Удаляем запись
+                del appointments_db[date_key][time_key]
+
+                # Если на эту дату больше нет записей, удаляем дату
+                if not appointments_db[date_key]:
+                    del appointments_db[date_key]
+
+                # Сохраняем данные
+                save_all_data()
+
+                # Уведомляем админа
+                admin_notification = (
+                    f"🗑 *Запись отменена!*\n\n"
+                    f"👤 *Клиент:* {cancelled_appointment.get('name')}\n"
+                    f"📞 *Телефон:* {cancelled_appointment.get('phone')}\n"
+                    f"💅 *Услуга:* {cancelled_appointment.get('service')}\n"
+                    f"💰 *Было оплачено:* {cancelled_appointment.get('price')}₽\n"
+                    f"↩️ *Возврат:* {selected_appointment['refund_info']['refund_amount']}₽\n"
+                    f"📅 *Дата:* {selected_appointment['date_display']}\n"
+                    f"⏰ *Время:* {selected_appointment['time']}\n"
+                    f"⏱ *Отменено через:* {selected_appointment['refund_info']['hours_left']} часов до записи"
+                )
+
+                await bot.send_message(ADMIN_ID, admin_notification, parse_mode="Markdown")
+
+                # Сообщение пользователю
+                await message.answer(
+                    f"✅ *Запись успешно отменена!*\n\n"
+                    f"📋 *Детали:*\n"
+                    f"• Дата: {selected_appointment['date_display']}\n"
+                    f"• Время: {selected_appointment['time']}\n"
+                    f"• Услуга: {selected_appointment['service']}\n\n"
+                    f"💰 *Возврат средств:*\n"
+                    f"• Возвращено: {selected_appointment['refund_info']['refund_amount']}₽\n"
+                    f"• Удержано: {selected_appointment['refund_info']['penalty']}₽\n\n"
+                    f"📞 *Возврат средств будет осуществлен в течение 3 рабочих дней.*\n"
+                    f"По всем вопросам: +7 (999) 123-45-67",
+                    reply_markup=main_kb(),
+                    parse_mode="Markdown"
+                )
+            else:
+                await message.answer("❌ Запись уже была удалена или не найдена.", reply_markup=main_kb())
+
+        except Exception as e:
+            logger.error(f"Ошибка при отмене записи: {e}")
+            await message.answer(f"❌ Ошибка при отмене записи: {str(e)[:100]}", reply_markup=main_kb())
+
+        await state.clear()
+
+    elif message.text == "❌ Нет, оставить":
+        await message.answer(
+            "✅ Отмена отменена. Запись сохранена.",
+            reply_markup=main_kb()
+        )
+        await state.clear()
+
+    else:
+        await message.answer(
+            "❌ Пожалуйста, выберите действие:\n"
+            "• ✅ Да, отменить - для отмены записи\n"
+            "• ❌ Нет, оставить - чтобы оставить запись\n"
+            "• ⬅️ Назад - чтобы выбрать другую запись"
+        )
+
+
+# ========== МОИ ПЛАТЕЖИ ==========
+@dp.message(F.text == "💰 Мои платежи")
+async def my_payments(message: types.Message):
+    """Показать мои платежи - ИСПРАВЛЕНА: добавлен обработчик"""
+    user_id = str(message.from_user.id)
+
+    # Ищем платежи пользователя
+    user_payments = []
+
+    # Платежи из активных записей
+    for date_key, times in appointments_db.items():
+        for time_key, appointment in times.items():
+            if str(appointment.get('user_id')) == user_id:
+                try:
+                    date_display = datetime.strptime(date_key, "%Y-%m-%d").strftime("%d.%m.%Y")
+                    status = "✅ Оплачено" if appointment.get('paid') else "⏳ Ожидает оплаты"
+                    payment_time = appointment.get('payment_time', 'Неизвестно')
+                    if payment_time != 'Неизвестно':
+                        try:
+                            payment_dt = datetime.fromisoformat(payment_time)
+                            payment_time = payment_dt.strftime("%d.%m.%Y %H:%M")
+                        except:
+                            pass
+
+                    user_payments.append(
+                        f"💳 *{status}*\n"
+                        f"📅 {date_display} {time_key}\n"
+                        f"💅 {appointment.get('service', 'Неизвестно')}\n"
+                        f"💰 {appointment.get('price', 0)}₽\n"
+                        f"🕒 {payment_time}"
+                    )
+                except:
+                    continue
+
+    # Отмененные записи с возвратами
+    for appt in cancelled_appointments:
+        if str(appt.get('user_id')) == user_id:
+            try:
+                date_display = appt.get('original_date', 'Неизвестно')
+                if date_display != 'Неизвестно':
+                    try:
+                        date_display = datetime.strptime(date_display, "%Y-%m-%d").strftime("%d.%m.%Y")
+                    except:
+                        pass
+
+                user_payments.append(
+                    f"↩️ *Возврат средств*\n"
+                    f"📅 {date_display} {appt.get('original_time', '')}\n"
+                    f"💅 {appt.get('service', 'Неизвестно')}\n"
+                    f"💰 Возвращено: {appt.get('refund_amount', 0)}₽\n"
+                    f"🕒 Отменено: {appt.get('cancelled_at', 'Неизвестно')[:16]}"
+                )
+            except:
+                continue
+
+    if user_payments:
+        text = "💰 *История ваших платежей:*\n\n" + "\n\n".join(user_payments)
+        text += f"\n\nВсего операций: {len(user_payments)}"
+    else:
+        text = "📭 У вас еще не было платежей.\n\nОплатите свою первую запись!"
+
+    await message.answer(text, reply_markup=main_kb(), parse_mode="Markdown")
+
+
+# ========== НАШИ РАБОТЫ ==========
+@dp.message(F.text == "🖼 Наши работы")
+async def show_gallery(message: types.Message):
+    """Показать галерею работ - ИСПРАВЛЕНА: добавлен обработчик"""
+    if not gallery_photos:
+        await message.answer(
+            "📭 В галерее пока нет работ.\n\n"
+            "Скоро мы добавим фотографии наших прекрасных работ! 💅",
+            reply_markup=main_kb()
+        )
+        return
+
+    await message.answer(
+        "🖼 *Наши работы*\n\n"
+        f"✨ *Посмотрите примеры наших работ:*\n"
+        f"Всего фото в галерее: {len(gallery_photos)}",
+        reply_markup=main_kb(),
+        parse_mode="Markdown"
+    )
+
+    # Отправляем несколько последних фото (максимум 5)
+    photos_to_show = min(5, len(gallery_photos))
+
+    for i in range(photos_to_show):
+        try:
+            photo_data = gallery_photos[-(i + 1)]  # Берем с конца (последние добавленные)
+
+            caption = ""
+            if photo_data.get('caption'):
+                caption = f"💅 {photo_data.get('caption')}"
+
+            await bot.send_photo(
+                chat_id=message.chat.id,
+                photo=photo_data['file_id'],
+                caption=caption
+            )
+
+            await asyncio.sleep(0.5)  # Задержка между отправками
+
+        except Exception as e:
+            logger.error(f"Ошибка отправки фото из галереи: {e}")
+            continue
+
+    if photos_to_show < len(gallery_photos):
+        await message.answer(
+            f"✨ *И ещё {len(gallery_photos) - photos_to_show} прекрасных работ в нашей галерее!*\n\n"
+            f"💅 *Запишитесь к нам и станьте следующей красавицей в нашей галерее!*",
+            reply_markup=main_kb(),
+            parse_mode="Markdown"
+        )
+
 
 # ========== АДМИН-ПАНЕЛЬ ==========
 @dp.message(F.text == "👑 Админ")
@@ -1244,92 +1896,6 @@ async def delete_photo_start(message: types.Message, state: FSMContext):
 
     await state.set_state(GalleryState.waiting_delete_number)
 
-@dp.callback_query(F.data.startswith("delete_simple_"))
-async def handle_simple_delete(callback: types.CallbackQuery):
-    """Обработчик удаления через inline-кнопку"""
-    if str(callback.from_user.id) != str(ADMIN_ID):
-        await callback.answer("Доступ запрещен")
-        return
-
-    try:
-        # Получаем ID фото из callback_data
-        photo_id = int(callback.data.replace("delete_simple_", ""))
-
-        if photo_id < 0 or photo_id >= len(gallery_photos):
-            await callback.answer("❌ Фото не найдено")
-            return
-
-        # Получаем данные фото
-        photo_to_delete = gallery_photos[photo_id]
-        caption = photo_to_delete.get('caption', 'без подписи')
-
-        # Удаляем фото
-        deleted_photo = gallery_photos.pop(photo_id)
-
-        # Сохраняем данные
-        save_all_data()
-
-        await callback.message.edit_text(
-            f"✅ *Фото удалено!*\n\n"
-            f"📸 Удалено фото #{photo_id}\n"
-            f"📝 Подпись: {caption}\n"
-            f"🖼 Осталось фото: {len(gallery_photos)}",
-            parse_mode="Markdown"
-        )
-
-        # Показываем новую клавиатуру, если еще есть фото
-        if gallery_photos:
-            await callback.message.answer(
-                "🗑 Хотите удалить ещё фото?",
-                reply_markup=gallery_admin_kb()
-            )
-
-    except Exception as e:
-        logger.error(f"Ошибка удаления: {e}")
-        await callback.answer(f"❌ Ошибка: {str(e)[:50]}")
-
-
-@dp.callback_query(F.data == "cancel_delete")
-async def handle_cancel_delete(callback: types.CallbackQuery):
-    """Отмена удаления"""
-    await callback.message.edit_text("❌ Удаление отменено")
-    await callback.message.answer("🖼️ Управление галереей:", reply_markup=gallery_admin_kb())
-
-
-@dp.message(Command("clear_gallery"))
-async def clear_gallery_command(message: types.Message):
-    """Полностью очистить галерею"""
-    if str(message.from_user.id) != str(ADMIN_ID):
-        return
-
-    if not gallery_photos:
-        await message.answer("📭 Галерея уже пуста")
-        return
-
-    # Создаем резервную копию
-    backup_data = {
-        "gallery_backup": gallery_photos.copy(),
-        "backup_date": datetime.now().isoformat(),
-        "count": len(gallery_photos)
-    }
-
-    backup_filename = f"gallery_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    with open(backup_filename, "w", encoding="utf-8") as f:
-        json.dump(backup_data, f, ensure_ascii=False, indent=2)
-
-    # Очищаем галерею
-    photo_count = len(gallery_photos)
-    gallery_photos.clear()
-    save_all_data()
-
-    await message.answer(
-        f"✅ *Галерея очищена!*\n\n"
-        f"🗑 Удалено фото: {photo_count}\n"
-        f"💾 Резервная копия: `{backup_filename}`\n\n"
-        f"🔄 Галерея готова к новым фото",
-        parse_mode="Markdown"
-    )
-
 
 @dp.message(GalleryState.waiting_delete_number)
 async def handle_delete_number(message: types.Message, state: FSMContext):
@@ -1473,6 +2039,7 @@ async def confirm_photo_deletion(message: types.Message, state: FSMContext):
             "• ❌ Нет, отмена - для отмены"
         )
 
+
 @dp.message(GalleryState.waiting_photo, F.text)
 async def handle_text_in_waiting_photo(message: types.Message, state: FSMContext):
     """Обработка текста в состоянии ожидания фото"""
@@ -1481,6 +2048,8 @@ async def handle_text_in_waiting_photo(message: types.Message, state: FSMContext
         await message.answer("❌ Добавление фото отменено", reply_markup=gallery_admin_kb())
     else:
         await message.answer("📤 Пожалуйста, отправьте фото (не текст)")
+
+
 # ========== НАСТРОЙКИ ==========
 @dp.message(F.text == "⚙️ Настройки")
 async def admin_settings(message: types.Message):
