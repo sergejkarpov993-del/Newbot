@@ -293,7 +293,7 @@ def main_kb():
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
         resize_keyboard=True,
-        input_field_placeholder="Выберите действие 👇"
+        input_field_placeholder="Выберите действия 👇"
     )
 
 
@@ -433,7 +433,8 @@ async def handle_payment_success(message: types.Message, payment_id: str):
             f"💅 *Услуга:* {payment_data['service_name']}\n"
             f"💰 *Сумма:* {payment_data['price']}₽\n"
             f"📅 *Дата:* {payment_data['date_display']}\n"
-            f"⏰ *Время:* {payment_data['time']}"
+            f"⏰ *Время:* {payment_data['time']}\n\n"
+            f"🆔 ID платежа: `{payment_id}`"
         )
         await bot.send_message(ADMIN_ID, admin_text, parse_mode="Markdown")
 
@@ -447,6 +448,9 @@ async def handle_payment_success(message: types.Message, payment_id: str):
             f"• Время: {payment_data['time']}\n\n"
             f"📍 *Адрес:* ул. Примерная, д. 1\n"
             f"📞 *Телефон:* +7 (999) 123-45-67\n\n"
+            f"⚠️ *Важная информация:*\n"
+            f"• Отменить запись можно не позднее чем за 1 час до визита\n"
+            f"• При отмене менее чем за 1 час деньги не возвращаются\n\n"
             f"✨ *Ждём вас в салоне!* ✨",
             reply_markup=main_kb(),
             parse_mode="Markdown"
@@ -476,7 +480,7 @@ async def start_appointment(message: types.Message, state: FSMContext):
 
 @dp.message(AppointmentState.choose_service)
 async def handle_service_selection(message: types.Message, state: FSMContext):
-    """Обработка выбора услуги - ИСПРАВЛЕНА: добавлено состояние"""
+    """Обработка выбора услуги"""
     logger.info(f"User {message.from_user.id} selected service: {message.text}")
 
     # Проверка на кнопку "Назад"
@@ -514,7 +518,7 @@ async def handle_service_selection(message: types.Message, state: FSMContext):
 
 @dp.message(AppointmentState.choose_date)
 async def handle_date_selection(message: types.Message, state: FSMContext):
-    """Обработка выбора даты - ИСПРАВЛЕНА: добавлено состояние"""
+    """Обработка выбора даты"""
     logger.info(f"User {message.from_user.id} selected date: {message.text}")
 
     # Проверка на кнопку "Назад"
@@ -587,7 +591,7 @@ async def handle_date_selection(message: types.Message, state: FSMContext):
 
 @dp.message(AppointmentState.choose_time)
 async def handle_time_selection(message: types.Message, state: FSMContext):
-    """Обработка выбора времени - ИСПРАВЛЕНА: добавлено состояние"""
+    """Обработка выбора времени"""
     logger.info(f"User {message.from_user.id} selected time: {message.text}")
 
     # Проверка на кнопку "Назад"
@@ -728,6 +732,14 @@ async def handle_phone_input(message: types.Message, state: FSMContext):
     # Сохраняем данные
     save_all_data()
 
+    # ДОБАВЛЯЕМ ПРЕДУПРЕЖДЕНИЕ ОБ ОТМЕНЕ ЗА 1 ЧАС
+    cancellation_warning = (
+        f"\n\n⚠️ *Важная информация:*\n"
+        f"• Отменить запись можно не позднее чем за 1 час до визита\n"
+        f"• При отмене менее чем за 1 час деньги не возвращаются\n"
+        f"• При отмене заранее возможен частичный возврат средств"
+    )
+
     # Отправляем сообщение с подтверждением и кнопкой оплаты
     confirmation_text = (
         f"✅ *Все данные заполнены!*\n\n"
@@ -741,13 +753,14 @@ async def handle_phone_input(message: types.Message, state: FSMContext):
         f"💳 *Для подтверждения записи необходимо произвести оплату.*\n\n"
         f"📍 *После оплаты запишитесь в наше расписание!*\n"
         f"📞 *По всем вопросам: +7 (999) 123-45-67*"
+        f"{cancellation_warning}"
     )
 
     # Создаем inline-кнопку для оплаты
     payment_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="💳 Оплатить онлайн", url=payment_link)],
-            [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"check_payment_{payment_id}")]
+            [InlineKeyboardButton(text="✅ Я оплатил (ТЕСТ)", callback_data=f"check_payment_{payment_id}")]
         ]
     )
 
@@ -762,18 +775,89 @@ async def handle_phone_input(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("check_payment_"))
 async def check_payment_handler(callback: types.CallbackQuery, state: FSMContext):
-    """Проверка оплаты"""
+    """ТЕСТОВЫЙ РЕЖИМ: обработка нажатия "Я оплатил" - сразу подтверждаем"""
     payment_id = callback.data.replace("check_payment_", "")
 
+    await callback.answer("✅ Оплата подтверждена! Создаю запись...")
+
     if payment_id in pending_payments:
-        await callback.answer("⏳ Платеж еще обрабатывается. Дождитесь уведомления об успешной оплате.")
+        payment_data = pending_payments[payment_id]
+
+        date_key = payment_data['date_obj'].strftime("%Y-%m-%d") if isinstance(payment_data['date_obj'], datetime) else \
+            payment_data['date_obj']
+        time_key = payment_data['time']
+
+        if date_key not in appointments_db:
+            appointments_db[date_key] = {}
+
+        # СОЗДАЕМ ЗАПИСЬ В БАЗЕ ДАННЫХ
+        appointments_db[date_key][time_key] = {
+            'user_id': payment_data['user_id'],
+            'name': payment_data['name'],
+            'phone': payment_data['phone'],
+            'service': payment_data['service_name'],
+            'service_key': payment_data['service_key'],
+            'price': payment_data['price'],
+            'payment_id': payment_id,
+            'payment_time': datetime.now().isoformat(),
+            'paid': True
+        }
+
+        users_db[payment_data['user_id']] = {
+            'name': payment_data['name'],
+            'phone': payment_data['phone']
+        }
+
+        # Сохраняем данные
+        save_all_data()
+
+        # УВЕДОМЛЯЕМ АДМИНИСТРАТОРА
+        admin_text = (
+            f"💰 *Новая оплаченная запись!*\n\n"
+            f"👤 *Клиент:* {payment_data['name']}\n"
+            f"📞 *Телефон:* {payment_data['phone']}\n"
+            f"💅 *Услуга:* {payment_data['service_name']}\n"
+            f"💰 *Сумма:* {payment_data['price']}₽\n"
+            f"📅 *Дата:* {payment_data['date_display']}\n"
+            f"⏰ *Время:* {payment_data['time']}\n\n"
+            f"🆔 ID платежа: `{payment_id}`\n"
+            f"✅ *Способ:* Тестовый режим (кнопка 'Я оплатил')"
+        )
+        await bot.send_message(ADMIN_ID, admin_text, parse_mode="Markdown")
+
+        # Сообщение клиенту
+        await callback.message.edit_text(
+            f"🎉 *Запись успешно оплачена!*\n\n"
+            f"✅ *Детали записи:*\n"
+            f"• Услуга: {payment_data['service_name']}\n"
+            f"• Сумма: {payment_data['price']}₽\n"
+            f"• Дата: {payment_data['date_display']}\n"
+            f"• Время: {payment_data['time']}\n\n"
+            f"📍 *Адрес:* ул. Примерная, д. 1\n"
+            f"📞 *Телефон:* +7 (999) 123-45-67\n\n"
+            f"⚠️ *Важная информация:*\n"
+            f"• Отменить запись можно не позднее чем за 1 час до визита\n"
+            f"• При отмене менее чем за 1 час деньги не возвращаются\n\n"
+            f"✨ *Ждём вас в салоне!* ✨",
+            parse_mode="Markdown"
+        )
+
+        # Отправляем отдельное сообщение с главным меню
+        await callback.message.answer(
+            "🏠 *Главное меню:*",
+            reply_markup=main_kb(),
+            parse_mode="Markdown"
+        )
+
+        del pending_payments[payment_id]
+        await state.clear()
     else:
-        await callback.answer("✅ Запись уже оплачена и подтверждена!")
+        await callback.answer("❌ Платеж не найден")
 
 
 @dp.message(F.text == "⬅️ Назад")
 async def back_handler(message: types.Message, state: FSMContext):
-    """Кнопка Назад - ИСПРАВЛЕНА: улучшена логика"""
+    """Кнопка Назад"""
     current_state = await state.get_state()
 
     if not current_state:
@@ -820,7 +904,7 @@ async def back_handler(message: types.Message, state: FSMContext):
 # ========== МОИ ЗАПИСИ ==========
 @dp.message(F.text == "📋 Мои записи")
 async def my_appointments(message: types.Message):
-    """Показать мои записи - ИСПРАВЛЕНА: добавлен обработчик"""
+    """Показать мои записи"""
     user_id = str(message.from_user.id)
 
     # Ищем записи пользователя
@@ -852,7 +936,7 @@ async def my_appointments(message: types.Message):
 # ========== ОТМЕНА ЗАПИСИ ==========
 @dp.message(F.text == "❌ Отменить запись")
 async def cancel_appointment_start(message: types.Message, state: FSMContext):
-    """Начать отмену записи - ИСПРАВЛЕНА: добавлен обработчик"""
+    """Начать отмену записи"""
     user_id = str(message.from_user.id)
 
     # Ищем записи пользователя
@@ -1093,7 +1177,7 @@ async def confirm_cancellation(message: types.Message, state: FSMContext):
 # ========== МОИ ПЛАТЕЖИ ==========
 @dp.message(F.text == "💰 Мои платежи")
 async def my_payments(message: types.Message):
-    """Показать мои платежи - ИСПРАВЛЕНА: добавлен обработчик"""
+    """Показать мои платежи"""
     user_id = str(message.from_user.id)
 
     # Ищем платежи пользователя
@@ -1157,7 +1241,7 @@ async def my_payments(message: types.Message):
 # ========== НАШИ РАБОТЫ ==========
 @dp.message(F.text == "🖼 Наши работы")
 async def show_gallery(message: types.Message):
-    """Показать галерею работ - ИСПРАВЛЕНА: добавлен обработчик"""
+    """Показать галерею работ"""
     if not gallery_photos:
         await message.answer(
             "📭 В галерее пока нет работ.\n\n"
@@ -1209,7 +1293,7 @@ async def show_gallery(message: types.Message):
 # ========== АДМИН-ПАНЕЛЬ ==========
 @dp.message(F.text == "👑 Админ")
 async def admin_panel(message: types.Message):
-    """Главная админ-панель - ИСПРАВЛЕНА"""
+    """Главная админ-панель"""
     logger.info(f"User {message.from_user.id} accessed admin panel")
 
     if str(message.from_user.id) != str(ADMIN_ID):
@@ -1247,7 +1331,7 @@ async def admin_panel(message: types.Message):
 # ========== СТАТИСТИКА ==========
 @dp.message(F.text == "📊 Статистика")
 async def admin_statistics(message: types.Message):
-    """Детальная статистика - ИСПРАВЛЕНА"""
+    """Детальная статистика"""
     logger.info(f"User {message.from_user.id} accessed statistics")
 
     if str(message.from_user.id) != str(ADMIN_ID):
@@ -1393,7 +1477,7 @@ async def admin_finances(message: types.Message):
 # ========== УПРАВЛЕНИЕ ==========
 @dp.message(F.text == "🔄 Управление")
 async def admin_management(message: types.Message):
-    """Меню управления - ИСПРАВЛЕНА"""
+    """Меню управления"""
     if str(message.from_user.id) != str(ADMIN_ID):
         return
 
@@ -1414,7 +1498,7 @@ async def admin_management(message: types.Message):
 # ========== ОЧИСТКА СТАРЫХ ЗАПИСЕЙ ==========
 @dp.message(F.text == "🗑 Очистить старые записи")
 async def cleanup_old_appointments(message: types.Message):
-    """Очистка старых записей - ИСПРАВЛЕНА"""
+    """Очистка старых записей"""
     if str(message.from_user.id) != str(ADMIN_ID):
         return
 
@@ -1466,7 +1550,7 @@ async def cleanup_old_appointments(message: types.Message):
 # ========== ЭКСПОРТ ДАННЫХ ==========
 @dp.message(F.text == "📤 Экспорт данных")
 async def export_data(message: types.Message):
-    """Экспорт данных - ИСПРАВЛЕНА"""
+    """Экспорт данных"""
     if str(message.from_user.id) != str(ADMIN_ID):
         return
 
@@ -1545,7 +1629,7 @@ async def export_data(message: types.Message):
 # ========== СБРОС БОТА ==========
 @dp.message(F.text == "🔄 Сбросить бота")
 async def reset_bot(message: types.Message):
-    """Сброс бота - ИСПРАВЛЕНА"""
+    """Сброс бота"""
     if str(message.from_user.id) != str(ADMIN_ID):
         return
 
@@ -1758,7 +1842,7 @@ async def save_admin_photo(message: types.Message, state: FSMContext):
 @dp.message(GalleryState.waiting_caption)
 async def save_photo_caption(message: types.Message, state: FSMContext):
     """Сохранение подписи к фото"""
-    if message.text.lower() == "❌ отмена":
+    if message.text.lower() == "❌ Отмена":
         await state.clear()
         await message.answer("❌ Операция отменена", reply_markup=gallery_admin_kb())
         return
@@ -1805,7 +1889,7 @@ async def save_photo_caption(message: types.Message, state: FSMContext):
 # ========== УДАЛЕНИЕ ФОТО ==========
 @dp.message(F.text == "🗑 Удалить фото")
 async def delete_photo_start(message: types.Message, state: FSMContext):
-    """Начать удаление фото - ИСПРАВЛЕНА НУМЕРАЦИЯ"""
+    """Начать удаление фото"""
     if str(message.from_user.id) != str(ADMIN_ID):
         return
 
@@ -1899,7 +1983,7 @@ async def delete_photo_start(message: types.Message, state: FSMContext):
 
 @dp.message(GalleryState.waiting_delete_number)
 async def handle_delete_number(message: types.Message, state: FSMContext):
-    """Обработка номера фото для удаления - ИСПРАВЛЕНА ЛОГИКА"""
+    """Обработка номера фото для удаления"""
 
     # Проверка на отмену
     if message.text.lower() in ["❌ отмена", "отмена", "cancel"]:
@@ -1983,7 +2067,7 @@ async def handle_delete_number(message: types.Message, state: FSMContext):
 
 @dp.message(GalleryState.confirm_delete)
 async def confirm_photo_deletion(message: types.Message, state: FSMContext):
-    """Подтверждение удаления фото - ИСПРАВЛЕНА"""
+    """Подтверждение удаления фото"""
 
     if message.text == "❌ Нет, отмена":
         await state.clear()
