@@ -1,0 +1,5 @@
+# VK Bot Framework
+vkbottle==4.3.12
+
+# Environment & Utils
+python-dotenv==1.0.0
